@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Column Controller</title>
+<style>
+  :root {
+    --bg: #0e0f12; --panel: #17191e; --line: #2a2d35; --text: #e8e9ec; --muted: #8b8f99;
+    --queue: #f2a53a; --play: #3ccf7a; --err: #ff5d5d; --held: #6aa8ff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 20px 16px 40px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: .02em; }
+  .conn { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--err); box-shadow: 0 0 8px var(--err); }
+  .dot.ok { background: var(--play); box-shadow: 0 0 8px var(--play); }
+
+  .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+  .col { background: var(--panel); border: 2px solid var(--line); border-radius: 12px; padding: 14px 16px; position: relative; }
+  .col .num { font-size: 40px; font-weight: 700; line-height: 1; }
+  .col .lbl { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; margin-top: 6px; }
+  .col.live { border-color: var(--play); }
+  .col.live .lbl { color: var(--play); }
+  .col.next { border-style: dashed; border-color: var(--queue); }
+  .col.next .lbl { color: var(--queue); }
+  .col button.mk { position: absolute; top: 10px; right: 10px; background: none; border: 1px solid var(--line); color: var(--muted);
+    border-radius: 6px; font-size: 11px; padding: 3px 7px; cursor: pointer; }
+  .col.next button.mk { display: none; }
+
+  .phase { text-align: center; font-size: 13px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); margin: 4px 0 14px; }
+  .phase b { color: var(--text); }
+
+  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .big { border: 0; border-radius: 14px; padding: 30px 12px; font-size: 26px; font-weight: 800; letter-spacing: .06em; cursor: pointer;
+    color: #111; transition: transform .05s, filter .15s, opacity .15s; }
+  .big small { display: block; font-size: 13px; font-weight: 600; letter-spacing: .02em; margin-top: 6px; opacity: .75; }
+  .big:active { transform: scale(.98); }
+  .big:disabled { opacity: .35; cursor: not-allowed; }
+  .big.queue { background: var(--queue); }
+  .big.play { background: var(--play); }
+  .big.flash { filter: brightness(1.4); }
+  .keys { color: var(--muted); font-size: 12px; text-align: center; margin: 10px 0 18px; }
+  kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font: 12px ui-monospace, monospace; color: var(--text); }
+
+  .err { background: #3a1717; border: 1px solid var(--err); color: #ffd0d0; border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; display: none; }
+  .err.show { display: block; }
+
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-top: 12px; }
+  section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+  .clip { display: grid; grid-template-columns: 70px 1fr 60px; gap: 10px; align-items: center; margin: 6px 0; font-size: 13px; }
+  .clip .name { grid-column: 1 / -1; color: var(--muted); font-size: 12px; margin-bottom: -4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar { height: 8px; background: #0b0c0f; border-radius: 4px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--play); transition: width .25s linear; }
+  .bar i.held { background: var(--held); }
+  .pct { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .empty { color: var(--muted); font-size: 13px; }
+  ol.log { list-style: none; margin: 0; padding: 0; font: 12px/1.6 ui-monospace, monospace; color: var(--muted); max-height: 180px; overflow: auto; }
+  ol.log .error { color: var(--err); } ol.log .warn { color: var(--queue); }
+  .foot { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; color: var(--muted); font-size: 12px; gap: 10px; flex-wrap: wrap; }
+  .foot button { background: none; border: 1px solid var(--line); color: var(--muted); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+  @media (max-width: 520px) { .big { padding: 24px 8px; font-size: 22px; } .col .num { font-size: 32px; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Column Controller</h1>
+    <div class="conn"><span class="dot" id="dot"></span><span id="connText">Connecting…</span></div>
+  </header>
+
+  <div class="err" id="err"></div>
+
+  <div class="columns" id="columns"></div>
+  <div class="phase" id="phase">—</div>
+
+  <div class="actions">
+    <button class="big queue" id="queueBtn">QUEUE<small id="queueSub">Column 1 → frame 1</small></button>
+    <button class="big play" id="playBtn">PLAY<small id="playSub">Holds on last frame</small></button>
+  </div>
+  <div class="keys"><kbd>Q</kbd> queue &nbsp;·&nbsp; <kbd>Space</kbd> / <kbd>P</kbd> play</div>
+
+  <section>
+    <h2>Live clips</h2>
+    <div id="clips"><div class="empty">Nothing queued yet.</div></div>
+  </section>
+
+  <section>
+    <h2>Log</h2>
+    <ol class="log" id="log"></ol>
+  </section>
+
+  <div class="foot">
+    <span id="api"></span>
+    <button id="resetBtn" title="Forget controller state (does not touch Resolume)">Reset controller</button>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let status = null;
+let inflight = false;
+
+const PHASES = {
+  idle: 'Idle — press <b>Queue</b> to arm the first column',
+  armed: 'Column <b>{c}</b> live · frozen on frame 1 · ready to play',
+  playing: 'Column <b>{c}</b> playing',
+  held: 'Column <b>{c}</b> holding on last frame',
+};
+
+function render(s) {
+  status = s;
+  const r = s.resolume || {};
+  $('dot').classList.toggle('ok', !!r.connected);
+  $('connText').textContent = r.connected
+    ? `Resolume ${r.product && r.product.name ? r.product.name + ' ' : ''}${r.product && r.product.major != null ? r.product.major + '.' + r.product.minor + '.' + r.product.micro : ''}`.trim()
+    : 'Resolume not reachable';
+  $('api').textContent = r.url || '';
+
+  $('columns').innerHTML = s.columns.map((c) => {
+    const live = c === s.liveColumn, next = c === s.nextColumn;
+    return `<div class="col ${live ? 'live' : ''} ${next ? 'next' : ''}">
+      <div class="num">${c}</div>
+      <div class="lbl">${live ? 'Live' : next ? 'Next' : '—'}${live && next ? ' · Next' : ''}</div>
+      <button class="mk" data-col="${c}">Make next</button></div>`;
+  }).join('');
+
+  $('phase').innerHTML = (PHASES[s.phase] || s.phase).replace('{c}', s.liveColumn);
+  $('queueSub').textContent = `Column ${s.nextColumn} → frame 1`;
+  $('playSub').textContent = s.liveColumn ? `Column ${s.liveColumn} · holds on last frame` : 'Queue a column first';
+  $('queueBtn').disabled = s.busy || inflight;
+  $('playBtn').disabled = s.busy || inflight || !s.liveColumn || s.phase === 'playing';
+
+  const err = s.lastError || (!r.connected && r.error ? `Cannot reach Resolume at ${r.url} — ${r.error}` : '');
+  $('err').textContent = err;
+  $('err').classList.toggle('show', !!err);
+
+  $('clips').innerHTML = s.clips.length ? s.clips.map((c) => {
+    const pct = c.max > 0 && c.position != null ? Math.min(100, (c.position / c.max) * 100) : 0;
+    const held = s.phase === 'held' || pct >= 99.9;
+    return `<div class="clip"><div class="name">${esc(c.name)}</div>
+      <span>Layer ${c.layer}</span><div class="bar"><i class="${held ? 'held' : ''}" style="width:${pct}%"></i></div>
+      <span class="pct">${c.error ? '!' : pct.toFixed(0) + '%'}</span></div>`;
+  }).join('') : '<div class="empty">Nothing queued yet.</div>';
+
+  $('log').innerHTML = (s.log || []).map((l) =>
+    `<li class="${l.level}">${new Date(l.t).toLocaleTimeString()}  ${esc(l.msg)}</li>`).join('');
+}
+
+const esc = (t) => String(t).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+
+async function call(path, body) {
+  inflight = true;
+  if (status) render(status);
+  try {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: body ? { 'Content-Type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await res.json();
+    if (data.status) render(data.status); else if (!data.error) render(data);
+    if (data.error && !data.status) { $('err').textContent = data.error; $('err').classList.add('show'); }
+  } catch (e) {
+    $('err').textContent = 'Controller server not reachable: ' + e.message;
+    $('err').classList.add('show');
+  } finally {
+    inflight = false;
+    if (status) render(status);
+  }
+}
+
+function flash(btn) { btn.classList.add('flash'); setTimeout(() => btn.classList.remove('flash'), 150); }
+function doQueue() { if (!$('queueBtn').disabled) { flash($('queueBtn')); call('/api/queue'); } }
+function doPlay() { if (!$('playBtn').disabled) { flash($('playBtn')); call('/api/play'); } }
+
+$('queueBtn').onclick = doQueue;
+$('playBtn').onclick = doPlay;
+$('resetBtn').onclick = () => confirm('Reset controller state? (Resolume is not changed.)') && call('/api/reset');
+$('columns').onclick = (e) => { const c = e.target.dataset && e.target.dataset.col; if (c) call('/api/next', { column: Number(c) }); };
+document.addEventListener('keydown', (e) => {
+  if (e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === 'q' || e.key === 'Q') { e.preventDefault(); doQueue(); }
+  else if (e.key === ' ' || e.key === 'p' || e.key === 'P') { e.preventDefault(); doPlay(); }
+});
+
+async function poll() {
+  try {
+    const res = await fetch('/api/status');
+    render(await res.json());
+  } catch (e) {
+    $('dot').classList.remove('ok');
+    $('connText').textContent = 'Controller offline';
+  }
+  setTimeout(poll, 400);
+}
+poll();
+</script>
+</body>
+</html>
