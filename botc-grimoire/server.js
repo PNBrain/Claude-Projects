@@ -12,6 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
+const zlib = require('zlib');
 const CH = require('./public/characters.js');
 
 const PORT = parseInt(process.env.PORT || argValue('--port') || '3000', 10);
@@ -79,6 +80,17 @@ function newSeat(name, playerId = null) {
     alive: true, voteToken: true, drunk: false, poisoned: false,
     reminders: [], stNote: '', voteMod: 1, revealed: false, messages: [],
   };
+}
+
+// Rulebook & almanac text: imported by the Storyteller from their own PDFs (data/library.json),
+// or bundled with a private copy of the app (library/library.json).
+const LIBRARY_FILE = path.join(DATA_DIR, 'library.json');
+const BUNDLED_LIBRARY = path.join(__dirname, 'library', 'library.json');
+let library = loadJSON(LIBRARY_FILE, null) || loadJSON(BUNDLED_LIBRARY, null);
+let libraryGz = null;
+function libraryInfo() {
+  if (!library) return null;
+  return { version: library.importedAt || 1, characters: Object.keys(library.characters || {}).length, rules: !!(library.rules && library.rules.length), editions: Object.keys(library.editions || {}) };
 }
 
 const db = loadJSON(STATE_FILE, null) || { stKey: null, players: {}, game: freshGame() };
@@ -181,6 +193,7 @@ function publicView() {
     vote: publicVote(g.vote),
     log: g.log.filter((l) => l.public).slice(-300),
     winner: g.winner,
+    library: libraryInfo(),
     serverTime: Date.now(),
   };
 }
@@ -571,10 +584,10 @@ function tokenMatches(t) {
   return crypto.timingSafeEqual(a, b) && String(t).length === 8;
 }
 
-function readBody(req) {
+function readBody(req, limit = 1e6) {
   return new Promise((resolve, reject) => {
     let data = '';
-    req.on('data', (c) => { data += c; if (data.length > 1e6) { reject(new Error('Body too large')); req.destroy(); } });
+    req.on('data', (c) => { data += c; if (data.length > limit) { reject(new Error('Body too large')); req.destroy(); } });
     req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch { reject(new Error('Bad JSON')); } });
     req.on('error', reject);
   });
@@ -625,9 +638,16 @@ const server = http.createServer(async (req, res) => {
       });
       return;
     }
+    if (url.pathname === '/api/library' && req.method === 'GET') {
+      if (!library) return json(res, 404, { error: 'No rulebook or almanac has been imported yet.' });
+      if (!libraryGz) libraryGz = zlib.gzipSync(JSON.stringify(library));
+      const gz = /\bgzip\b/.test(req.headers['accept-encoding'] || '');
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache', ...(gz ? { 'Content-Encoding': 'gzip' } : {}) });
+      return res.end(gz ? libraryGz : JSON.stringify(library));
+    }
     if (url.pathname.startsWith('/api/')) {
       if (req.method !== 'POST') return json(res, 405, { error: 'POST only' });
-      const body = await readBody(req);
+      const body = await readBody(req, url.pathname === '/api/library' ? 20e6 : 1e6);
       const key = req.headers['x-key'];
 
       if (url.pathname === '/api/claim') {
@@ -688,6 +708,25 @@ const server = http.createServer(async (req, res) => {
           return json(res, 200, { ok: true });
         }
         return json(res, 401, { error: 'Join the game first' });
+      }
+
+      if (url.pathname === '/api/library') {
+        if (w.kind !== 'st') return json(res, 403, { error: 'Only the Storyteller can import the rulebook and almanacs.' });
+        const lib = body.library;
+        if (!lib || typeof lib !== 'object' || typeof lib.characters !== 'object') return json(res, 400, { error: 'Nothing recognisable was imported.' });
+        // Merge so the PDFs can be imported one at a time.
+        const merged = library ? { ...library } : { version: 1, characters: {}, editions: {}, rules: null, glossary: null, sources: [] };
+        merged.characters = { ...(merged.characters || {}), ...lib.characters };
+        merged.editions = { ...(merged.editions || {}), ...(lib.editions || {}) };
+        if (Array.isArray(lib.rules) && lib.rules.length) { merged.rules = lib.rules; merged.glossary = lib.glossary || []; }
+        const names = new Set((lib.sources || []).map((x) => x.name));
+        merged.sources = (merged.sources || []).filter((x) => !names.has(x.name)).concat(lib.sources || []);
+        merged.importedAt = Date.now();
+        library = merged; libraryGz = null;
+        saveJSON(LIBRARY_FILE, library);
+        console.log(`Library imported: ${Object.keys(library.characters).length} characters, ${library.rules ? library.rules.length : 0} rule sections.`);
+        broadcast();
+        return json(res, 200, { ok: true, info: libraryInfo() });
       }
 
       if (url.pathname === '/api/notes') {

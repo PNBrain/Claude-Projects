@@ -29,6 +29,17 @@
   };
   let notes = null;
   let pendingRender = false;
+  let LIB = null; // rulebook & almanac text (imported by the Storyteller)
+  let libVersion = null;
+  ui.show = null; ui.bookSeg = 'chars';
+  const libChar = (id) => (LIB && LIB.characters ? LIB.characters[id] : null);
+  function syncLibrary() {
+    const info = V && V.library;
+    if (!info) { LIB = null; libVersion = null; return; }
+    if (info.version === libVersion) return;
+    libVersion = info.version;
+    fetch('/api/library').then((r) => (r.ok ? r.json() : null)).then((j) => { LIB = j; render(); }).catch(() => { libVersion = null; });
+  }
 
   function toast(msg, ms = 2600) {
     const t = $('#toast');
@@ -56,6 +67,7 @@
       if ((role === 'st' || role === 'player') && v.role !== role) { logout('Your session has expired. Please sign in again.'); return; }
       const first = !V;
       V = v;
+      syncLibrary();
       if (v.role === 'player') onPlayerView(first);
       render();
     };
@@ -103,7 +115,7 @@
   // ------------------------------------------------------------ rendering infra
   function busy(el) {
     const a = document.activeElement;
-    return a && el && el.contains(a) && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && !['checkbox', 'radio', 'button'].includes(a.type)));
+    return a && el && el.contains(a) && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'file'].includes(a.type)));
   }
   document.addEventListener('focusout', () => setTimeout(() => { if (pendingRender && !busy($('#app')) && !busy($('#modal'))) render(); }, 0));
 
@@ -121,13 +133,15 @@
     if (!ui.tab || !tabs.find((t) => t[0] === ui.tab)) ui.tab = tabs[0][0];
     const scrollY = window.scrollY;
     app.innerHTML = header() + `<nav class="tabs">${tabs.map(([id, label, icon]) => `<button data-act="tab" data-tab="${id}" class="${ui.tab === id ? 'on' : ''}"><span class="ti">${icon}</span><span>${label}</span>${id === 'me' && ui.newInfo ? '<i class="dot"></i>' : ''}</button>`).join('')}</nav><main class="main tab-${ui.tab}">${body()}</main>`;
+    if (V.role === 'st') app.insertAdjacentHTML('beforeend', '<button class="fab" data-act="compose" data-id="" title="Show a token or info on this screen">👁 Show</button>');
     window.scrollTo(0, scrollY);
     renderModal();
+    renderShow();
   }
   function tabList() {
-    if (V.role === 'st') return [['grim', 'Grimoire', '◉'], ['setup', 'Setup', '⚙'], ['night', 'Night', '☾'], ['day', 'Day', '☀'], ['log', 'Log', '☰'], ['more', 'More', '⋯']];
-    if (V.role === 'player') return [['town', 'Town', '◉'], ['me', 'Me', '♟'], ['notes', 'Notes', '✎'], ['script', 'Script', '❖'], ['log', 'Log', '☰']];
-    return [['town', 'Town', '◉'], ['script', 'Script', '❖'], ['log', 'Log', '☰']];
+    if (V.role === 'st') return [['grim', 'Grimoire', '◉'], ['setup', 'Setup', '⚙'], ['night', 'Night', '☾'], ['day', 'Day', '☀'], ['book', 'Book', '❖'], ['log', 'Log', '☰'], ['more', 'More', '⋯']];
+    if (V.role === 'player') return [['town', 'Town', '◉'], ['me', 'Me', '♟'], ['notes', 'Notes', '✎'], ['book', 'Book', '❖'], ['log', 'Log', '☰']];
+    return [['town', 'Town', '◉'], ['book', 'Book', '❖'], ['log', 'Log', '☰']];
   }
   function phaseLabel() {
     if (V.phase === 'setup') return '<span class="ph setup">Setting up</span>';
@@ -149,7 +163,7 @@
       case 'town': return townTab();
       case 'me': return meTab();
       case 'notes': return notesTab();
-      case 'script': return scriptTab();
+      case 'book': return bookView();
       case 'log': return logTab();
       default: return '';
     }
@@ -240,9 +254,39 @@
   const seatName = (id) => (V.seats.find((s) => s.id === id) || {}).name || '?';
 
   // ------------------------------------------------------------ shared bits
-  function charCard(id, extra = '') {
+  function charCard(id, extra = '', opts = {}) {
     const c = CH[id]; if (!c) return '';
-    return `<div class="cc team-${c.team}"><div class="cch"><span class="tokmini team-${c.team}">${esc(initials(c.name))}</span><b>${esc(c.name)}</b><span class="tm">${esc(C.TEAM_LABEL[c.team].replace(/s$/, ''))}</span>${extra}</div><p>${esc(c.ability)}</p></div>`;
+    const alm = opts.alm && libChar(id) ? `<details class="almd" ${opts.open ? 'open' : ''}><summary>Almanac: ${esc(c.name)}</summary>${almanacHtml(id, opts.q)}</details>` : '';
+    return `<div class="cc team-${c.team}"><div class="cch"><span class="tokmini team-${c.team}">${esc(initials(c.name))}</span><b>${hl(c.name, opts.q)}</b><span class="tm">${esc(C.TEAM_LABEL[c.team].replace(/s$/, ''))}</span>${extra}</div><p>${hl(c.ability, opts.q)}</p>${alm}</div>`;
+  }
+  // Escape, then highlight a search query.
+  function hl(text, q) {
+    const t = esc(text);
+    if (!q) return t;
+    const re = new RegExp(esc(q).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+    return t.replace(re, (m) => `<mark>${m}</mark>`);
+  }
+  const paras = (list, q) => (list || []).map((t) => `<p>${hl(t, q)}</p>`).join('');
+  function almanacHtml(id, q) {
+    const e = libChar(id); if (!e) return '';
+    return `<div class="alm">${e.quote ? `<blockquote>${hl(e.quote, q)}</blockquote>` : ''}${paras(e.overview, q)}
+      ${e.examples.length ? `<h5>Examples</h5><div class="ex">${paras(e.examples, q)}</div>` : ''}
+      ${e.howToRun.length ? `<h5>How to run</h5>${paras(e.howToRun, q)}` : ''}
+      ${(e.extra || []).map((x) => `<h5>${hl(x.title, q)}</h5>${paras(x.paras, q)}`).join('')}</div>`;
+  }
+  // Official night-sheet text: the almanac's How to Run, or the rulebook for Dusk/Dawn/Minion & Demon info.
+  const RULE_STEPS = { dusk: ['To start the night'], minioninfo: ['1. WAKE ALL THE MINIONS'], demoninfo: ['2. WAKE THE DEMON'], dawn: ['When you reach dawn', 'If any players died at night'] };
+  function officialNight(id, first) {
+    if (RULE_STEPS[id]) {
+      if (!LIB || !LIB.rules) return null;
+      const out = [];
+      for (const pre of RULE_STEPS[id]) for (const sec of LIB.rules) for (const b of sec.blocks) if (b.t === 'p' && b.text.toUpperCase().startsWith(pre.toUpperCase()) && !out.includes(b.text)) out.push(b.text);
+      return out.length ? out : null;
+    }
+    const e = libChar(id);
+    if (!e || !e.howToRun.length) return null;
+    const sel = e.howToRun.filter((t) => (first ? !/except the first|each night\*/i.test(t) : !/first night/i.test(t) || /except the first/i.test(t)));
+    return sel.length ? sel : e.howToRun;
   }
   function charOptions(selected, opts = {}) {
     const script = new Set(V.script);
@@ -300,7 +344,7 @@
       <div class="edh"><input class="title-in" data-change="renameSeat" data-id="${s.id}" value="${esc(s.name)}" aria-label="Seat name"><button class="btn sm ghost" data-act="closeSel">✕</button></div>
       <p class="hint">${player ? `Linked to ${esc(player.name)}'s device ${pub.online ? '<span class="ok">● online</span>' : '<span class="dim">○ offline</span>'}` : 'No device linked'}</p>
       <label>Character<select data-change="assign" data-id="${s.id}">${charOptions(s.character)}</select></label>
-      ${s.character ? charCard(s.character) : ''}
+      ${s.character ? charCard(s.character, '', { alm: true }) : ''}
       <label>Player thinks they are <select data-change="setShown" data-id="${s.id}">${charOptions(s.shownChar, { empty: '(their real character)' })}</select></label>
       <div class="row wrap">
         <div class="seg"><button class="${s.alignment !== 'evil' ? 'on good' : ''}" data-act="align" data-id="${s.id}" data-v="good">Good</button><button class="${s.alignment === 'evil' ? 'on evil' : ''}" data-act="align" data-id="${s.id}" data-v="evil">Evil</button></div>
@@ -319,7 +363,8 @@
       <label>Private Storyteller note<textarea data-change="setStNote" data-id="${s.id}" rows="2">${esc(s.stNote)}</textarea></label>
       <div class="sect"><h4>Tell this player (on their device)</h4>
         <div class="row wrap">
-          <button class="btn sm gold" data-act="reveal" data-id="${s.id}" ${s.character ? '' : 'disabled'}>Show their character${s.revealed ? ' again' : ''}</button>
+          <button class="btn sm" data-act="showChar" data-id="${s.id}" ${s.character ? '' : 'disabled'}>👁 Show their character here</button>
+          <button class="btn sm gold" data-act="reveal" data-id="${s.id}" ${s.character ? '' : 'disabled'}>Send their character${s.revealed ? ' again' : ''}</button>
           <button class="btn sm" data-act="compose" data-id="${s.id}">Send info…</button>
           <button class="btn sm" data-act="quick" data-id="${s.id}" data-k="yes">Nod (yes)</button>
           <button class="btn sm" data-act="quick" data-id="${s.id}" data-k="no">Shake (no)</button>
@@ -415,7 +460,7 @@
     }
     const unrevealed = V.full.seats.filter((s) => s.character && !s.revealed).length;
     return `${winBanner()}<div class="card"><h3>☾ ${V.nightNumber === 1 ? 'First night' : 'Night ' + V.nightNumber}</h3>
-      <p class="hint">Work down the list. Greyed rows are dead players: wake them only if their ability says so.</p>
+      <p class="hint">Work down the list. Greyed rows are dead players: wake them only if their ability says so.${LIB ? ' Instructions are the official How to Run text.' : ' Import the rulebook and almanacs (More tab) to see the official How to Run text here.'}</p>
       ${unrevealed ? `<div class="banner"><span>${plural(unrevealed, 'player')} haven't been shown their character.</span><button class="btn sm gold" data-act="reveal" data-id="all">Send characters</button></div>` : ''}
     </div>` + nightList(false) + `<div class="card"><button class="btn primary wide" data-act="startDay">☀ Dawn: start day ${V.nightNumber}</button><p class="hint">Players who died since dusk are announced automatically.</p></div>`;
   }
@@ -426,10 +471,17 @@
     return `<ol class="night">${steps.map((st) => {
       const allDead = st.seats.length && st.seats.every((s) => !s.alive);
       const who = st.seats.map((s) => `<span class="who ${s.alive ? '' : 'dead'}">${esc(s.name)}${s.character === 'drunk' ? ' <em>(Drunk)</em>' : ''}${s.drunk ? ' <b class="mk dr">D</b>' : ''}${s.poisoned ? ' <b class="mk po">P</b>' : ''}${s.alive ? '' : ' ✝'}</span>`).join('');
-      const btns = preview ? '' : st.seats.filter((s) => s.playerId).map((s) => `<button class="btn xs" data-act="compose" data-id="${s.id}" data-night="${st.id}">Send to ${esc(s.name)}</button>`).join('') + (st.evilInfo && st.id === 'demoninfo' ? `<button class="btn xs gold" data-act="evilInfo">Send Minion &amp; Demon info to devices</button>` : '');
+      let btns = '';
+      if (!preview) {
+        btns = st.seats.map((s) => `<button class="btn xs" data-act="compose" data-id="${s.id}">👁 Show / send to ${esc(s.name)}</button>`).join('');
+        if (st.id === 'minioninfo') btns += `<button class="btn xs" data-act="showPreset" data-k="demon">👁 Show the Demon</button>`;
+        if (st.id === 'demoninfo') btns += `<button class="btn xs" data-act="showPreset" data-k="minions">👁 Show Minions</button><button class="btn xs" data-act="showPreset" data-k="bluffs">👁 Show bluffs</button><button class="btn xs gold" data-act="evilInfo">Send Minion &amp; Demon info to devices</button>`;
+      }
+      const official = officialNight(st.id, V.nightNumber <= 1 || V.phase === 'setup');
+      const text = official ? `<div class="official">${official.map((t) => `<p>${esc(t)}</p>`).join('')}</div>` : `<p>${esc(st.text)}${LIB ? '' : ' <span class="dim">(summary)</span>'}</p>`;
       return `<li class="step ${done[st.id] ? 'done' : ''} ${allDead ? 'deadstep' : ''} team-${cteam(st.id) || 'special'}">
         ${preview ? '' : `<button class="check" data-act="nightDone" data-k="${st.id}" aria-label="Done">${done[st.id] ? '✓' : ''}</button>`}
-        <div class="stepb"><div class="sth"><b>${esc(st.name)}</b>${who}</div><p>${esc(st.text)}</p>${btns ? `<div class="row wrap">${btns}</div>` : ''}</div></li>`;
+        <div class="stepb"><div class="sth"><b>${esc(st.name)}</b>${who}</div>${text}${btns ? `<div class="row wrap">${btns}</div>` : ''}</div></li>`;
     }).join('')}</ol>`;
   }
 
@@ -506,6 +558,7 @@
         <button class="btn ghost" data-act="newGame" data-keep="1">Restart, same characters</button>
       </div>
       <label class="inline"><input type="checkbox" data-change="showAll" ${ui.showAllChars ? 'checked' : ''}> Show off-script characters in pickers</label></div>
+      ${libraryCard()}
       <div class="card"><h3>Devices</h3>
         <p>Players open ${V.lanUrls.length ? V.lanUrls.map((u) => `<code>${esc(u)}</code>`).join(' or ') : 'this server\'s address'} on the same Wi-Fi.</p>
         <table class="noms"><thead><tr><th>Player</th><th>Code</th><th>Seat</th><th></th></tr></thead><tbody>${V.players.map((p) => `<tr><td>${p.online ? '<span class="ok">●</span>' : '<span class="dim">○</span>'} ${esc(p.name)}</td><td><code>${esc(p.code)}</code></td><td>${p.seatId ? esc(seatName(p.seatId)) : '<em>unseated</em>'}</td><td><button class="btn xs ghost danger" data-act="kick" data-p="${p.id}">Remove</button></td></tr>`).join('') || '<tr><td colspan="4" class="dim">Nobody has joined yet.</td></tr>'}</tbody></table>
@@ -604,17 +657,65 @@
   }
 
   // ------------------------------------------------------------ Script & Log
-  function scriptTab() {
-    const q = ui.scriptQ.toLowerCase();
-    const ids = V.script.concat(C.editionTravellers(V.edition), V.fabled);
-    const match = (id) => !q || CH[id].name.toLowerCase().includes(q) || CH[id].ability.toLowerCase().includes(q);
-    let out = `<div class="card"><input class="search" data-change="scriptQ" data-live="1" value="${esc(ui.scriptQ)}" placeholder="Search characters…" type="search"><p class="hint">* "Each night*" means every night except the first.</p></div>`;
-    for (const t of C.TEAMS) {
-      const list = ids.filter((id) => cteam(id) === t && match(id));
-      if (!list.length) continue;
-      out += `<section class="card"><h3 class="team-${t}">${C.TEAM_LABEL[t]}</h3>${[...new Set(list)].map((id) => charCard(id)).join('')}</section>`;
+  function bookView() {
+    const q = ui.scriptQ.trim();
+    const ql = q.toLowerCase();
+    const st = V.role === 'st';
+    const fabled = st ? C.ORDER.filter((id) => cteam(id) === 'fabled') : V.fabled;
+    const ids = [...new Set(V.script.concat(C.editionTravellers(V.edition), fabled))];
+    const segs = [['chars', 'Characters'], ['rules', 'Rules'], ['gloss', 'Glossary'], ['setups', 'Setups']];
+    let out = `<div class="card"><input class="search" data-change="scriptQ" data-live="1" value="${esc(ui.scriptQ)}" placeholder="Search characters, rules and glossary…" type="search">
+      ${q ? '' : `<div class="seg book-seg">${segs.map(([k, l]) => `<button class="${ui.bookSeg === k ? 'on' : ''}" data-act="bookSeg" data-k="${k}">${l}</button>`).join('')}</div>`}
+      ${LIB ? '' : `<p class="hint">${st ? 'Import the rulebook and almanac PDFs on the More tab to add the full almanac entries, rules and glossary.' : 'The Storyteller hasn\'t imported the rulebook and almanacs yet, so only abilities are shown.'}</p>`}</div>`;
+    const showBtn = (id) => (st ? `<button class="btn xs" data-act="bookShow" data-c="${id}">👁 Show</button>` : '');
+    const charMatch = (id) => {
+      if (!ql) return true;
+      const c = CH[id]; const e = libChar(id);
+      const hay = [c.name, c.ability].concat(e ? [e.quote, ...e.overview, ...e.examples, ...e.howToRun] : []).join(' ').toLowerCase();
+      return hay.includes(ql);
+    };
+    const charsHtml = () => C.TEAMS.map((t) => {
+      const list = ids.filter((id) => cteam(id) === t && charMatch(id));
+      if (!list.length) return '';
+      return `<section class="card"><h3 class="team-${t}">${C.TEAM_LABEL[t]}</h3>${list.map((id) => charCard(id, showBtn(id), { alm: true, q, open: !!q })).join('')}</section>`;
+    }).join('');
+    const rulesHtml = () => {
+      if (!LIB || !LIB.rules) return '';
+      const secs = LIB.rules.map((sec) => {
+        const blocks = ql ? sec.blocks.filter((b) => b.text.toLowerCase().includes(ql)) : sec.blocks;
+        if (!blocks.length && !(ql && sec.title.toLowerCase().includes(ql))) return '';
+        return `<details class="rule" ${ql ? 'open' : ''}><summary>${hl(sec.title, q)}</summary>${(ql && !blocks.length ? sec.blocks : blocks).map((b) => (b.t === 'h' ? `<h5>${hl(b.text, q)}</h5>` : `<p>${hl(b.text, q)}</p>`)).join('')}</details>`;
+      }).join('');
+      return secs ? `<section class="card"><h3>Rules</h3>${secs}</section>` : '';
+    };
+    const glossHtml = () => {
+      if (!LIB || !LIB.glossary) return '';
+      const list = LIB.glossary.filter((g) => !ql || (g.term + ' ' + g.text).toLowerCase().includes(ql));
+      return list.length ? `<section class="card"><h3>Glossary</h3><dl class="gloss">${list.map((g) => `<dt>${hl(g.term, q)}</dt><dd>${hl(g.text, q)}</dd>`).join('')}</dl></section>` : '';
+    };
+    const setupsHtml = () => {
+      if (!LIB || !LIB.editions) return '';
+      const eds = Object.entries(LIB.editions).filter(([, e]) => e.notes && e.notes.length).sort(([a], [b]) => (a === V.edition ? -1 : b === V.edition ? 1 : 0));
+      return eds.map(([k, e]) => `<section class="card"><h3>${esc(e.title)}: suggested setups</h3>${e.notes.filter((n) => !ql || n.text.toLowerCase().includes(ql)).map((n) => (n.t === 'h' ? `<h5>${hl(n.text, q)}</h5>` : `<p>${hl(n.text, q)}</p>`)).join('')}</section>`).join('')
+        || '<section class="card"><p class="dim">No suggested setups were found in the imported almanacs.</p></section>';
+    };
+    if (q) {
+      const res = charsHtml() + rulesHtml() + glossHtml();
+      return out + (res || '<div class="card"><p class="dim">No matches.</p></div>');
     }
-    return out;
+    if (ui.bookSeg === 'rules') return out + (rulesHtml() || '<div class="card"><p class="dim">No rulebook imported.</p></div>');
+    if (ui.bookSeg === 'gloss') return out + (glossHtml() || '<div class="card"><p class="dim">No rulebook imported.</p></div>');
+    if (ui.bookSeg === 'setups') return out + setupsHtml();
+    return out + `<p class="hint pad">* "Each night*" means every night except the first.</p>` + charsHtml();
+  }
+  function libraryCard() {
+    const info = V.library;
+    const src = LIB && LIB.sources ? LIB.sources : [];
+    return `<div class="card"><h3>Rulebook &amp; almanacs</h3>
+      ${info ? `<p>Loaded: ${info.characters} characters${info.rules ? ', the rulebook and glossary' : ''}.</p>${src.length ? `<ul class="srcs">${src.map((x) => `<li>${esc(x.name)} <span class="dim">(${x.kind === 'rulebook' ? `${x.sections} rule sections, ${x.glossary} glossary terms` : `${x.characters} characters`})</span></li>`).join('')}</ul>` : ''}` : '<p>Nothing imported yet. The app shows only abilities and short night prompts.</p>'}
+      <label>Choose the PDFs (the rulebook and any of the almanacs)<input type="file" id="libFiles" accept="application/pdf,.pdf" multiple></label>
+      <button class="btn gold" data-act="importLib">Import</button>
+      <p class="hint">The PDFs are read in this browser, and the extracted text is saved on the server in <code>data/library.json</code>. Players can read it on their Book tab.</p></div>`;
   }
   function logTab() {
     const entries = (V.role === 'st' ? V.full.log : V.log).slice().reverse();
@@ -630,11 +731,11 @@
     if (!ui.compose || V.role !== 'st') { m.innerHTML = ''; return; }
     if (busy(m)) return;
     const c = ui.compose;
-    const s = V.full.seats.find((x) => x.id === c.seatId);
-    if (!s) { ui.compose = null; m.innerHTML = ''; return; }
-    m.innerHTML = `<div class="overlay" data-act="closeCompose"></div><div class="sheet" role="dialog" aria-label="Send information">
-      <div class="edh"><h3>Send to ${esc(s.name)}${s.character ? ` <small class="dim">(${esc(cname(s.character))}${s.shownChar ? ', thinks ' + esc(cname(s.shownChar)) : ''})</small>` : ''}</h3><button class="btn sm ghost" data-act="closeCompose">✕</button></div>
-      <div class="row wrap">${['YOU ARE', 'THIS IS THE DEMON', 'THESE ARE YOUR MINIONS', 'THESE CHARACTERS ARE NOT IN PLAY', 'THIS CHARACTER SELECTED YOU', 'YOU ARE NOW'].map((t) => `<button class="chip ${c.text === t ? 'on' : ''}" data-act="cText" data-t="${t}">${t}</button>`).join('')}</div>
+    const s = c.seatId ? V.full.seats.find((x) => x.id === c.seatId) : null;
+    if (c.seatId && !s) { ui.compose = null; m.innerHTML = ''; return; }
+    m.innerHTML = `<div class="overlay" data-act="closeCompose"></div><div class="sheet" role="dialog" aria-label="Show or send information">
+      <div class="edh"><h3>${s ? `Show or send to ${esc(s.name)}${s.character ? ` <small class="dim">(${esc(cname(s.character))}${s.shownChar ? ', thinks ' + esc(cname(s.shownChar)) : ''})</small>` : ''}` : 'Show on this screen'}</h3><button class="btn sm ghost" data-act="closeCompose">✕</button></div>
+      <div class="row wrap">${INFO_TOKENS.map((t) => `<button class="chip ${c.text === t ? 'on' : ''}" data-act="cText" data-t="${t}">${t}</button>`).join('')}</div>
       <label>Message<textarea id="cText" rows="2" placeholder="e.g. One of these players is the Chef">${esc(c.text)}</textarea></label>
       <div class="row wrap"><label>Show character<select data-change="cChar">${charOptions('', { empty: '+ character token', all: true, fabled: true })}</select></label>
         <label>Point to player<select data-change="cSeat">${seatOptions('', null, '+ player')}</select></label></div>
@@ -642,14 +743,74 @@
       <div class="row wrap"><label>Number (fingers)<input id="cNum" type="number" min="0" max="20" value="${c.number == null ? '' : c.number}" inputmode="numeric"></label>
         <div class="seg"><button class="${c.yes === true ? 'on good' : ''}" data-act="cYes" data-v="1">Yes</button><button class="${c.yes === false ? 'on evil' : ''}" data-act="cYes" data-v="0">No</button></div>
         <div class="seg"><button class="${c.align === 'good' ? 'on good' : ''}" data-act="cAlign" data-v="good">👍 Good</button><button class="${c.align === 'evil' ? 'on evil' : ''}" data-act="cAlign" data-v="evil">👎 Evil</button></div></div>
-      <div class="row end"><button class="btn ghost" data-act="cClear">Clear</button><button class="btn gold" data-act="cSend">Send</button></div>
-      <p class="hint">Use "YOU ARE" + a character to change what this player believes they are.</p>
+      <div class="row end"><button class="btn ghost" data-act="cClear">Clear</button><button class="btn primary" data-act="cShow">👁 Show on this screen</button>${s ? `<button class="btn gold" data-act="cSend" title="${s.playerId ? '' : 'No device is linked to this seat'}">Send to ${esc(s.name)}'s device</button>` : ''}</div>
+      <p class="hint">"Show" fills this screen so you can hold it up to the player, like showing a token. "Send" puts it on their own device.${s ? ' Sending "YOU ARE" + one character changes what this player believes they are.' : ''}</p>
     </div>`;
   }
+  const INFO_TOKENS = ['THIS IS THE DEMON', 'THESE ARE YOUR MINIONS', 'THESE CHARACTERS ARE NOT IN PLAY', 'YOU ARE', 'THIS CHARACTER SELECTED YOU', 'THIS PLAYER IS', 'YOU ARE NOW', 'DID YOU NOMINATE TODAY?', 'USE YOUR ABILITY?'];
+
+  // ------------------------------------------------------------ Show-to-player screen (ST)
+  function bigToken(id) {
+    const c = CH[id]; if (!c) return '';
+    return `<div class="bigtok-wrap"><div class="bigtok team-${c.team}"><span>${esc(c.name)}</span></div><p>${esc(c.ability)}</p></div>`;
+  }
+  function renderShow() {
+    let el = $('#show');
+    if (!el) { el = document.createElement('div'); el.id = 'show'; document.body.appendChild(el); }
+    const sh = ui.show;
+    if (!sh || !V || V.role !== 'st') { el.innerHTML = ''; el.className = ''; return; }
+    el.className = 'showscreen' + (sh.flip ? ' flip' : '');
+    el.innerHTML = `<div class="showbar"><button data-act="showFlip">⟲ Flip</button><button data-act="showEdit">✎ Edit</button><button data-act="showClose">✕ Close</button></div>
+      <div class="showbody">
+        ${sh.text ? `<div class="infotok">${esc(sh.text)}</div>` : ''}
+        ${sh.chars && sh.chars.length ? `<div class="bigtoks">${sh.chars.map(bigToken).join('')}</div>` : ''}
+        ${sh.seats && sh.seats.length ? `<div class="showseats">${sh.seats.map((id) => `<span>👉 ${esc(seatName(id))}</span>`).join('')}</div>` : ''}
+        ${sh.number != null ? `<div class="shownum">${esc(sh.number)}</div>` : ''}
+        ${sh.yes != null ? `<div class="showyes ${sh.yes ? 'y' : 'n'}">${sh.yes ? 'YES' : 'NO'}</div>` : ''}
+        ${sh.align ? `<div class="showalign ${sh.align}">${sh.align === 'good' ? '👍 GOOD' : '👎 EVIL'}</div>` : ''}
+      </div>`;
+  }
+  function openShow(content) {
+    ui.show = { text: '', chars: [], seats: [], number: null, yes: null, align: null, flip: false, ...content };
+    ui.compose = null; renderModal();
+    renderShow();
+    try { if (document.documentElement.requestFullscreen && !document.fullscreenElement) document.documentElement.requestFullscreen().catch(() => {}); } catch { /* */ }
+  }
+  function closeShow() {
+    ui.show = null; renderShow();
+    try { if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); } catch { /* */ }
+  }
+
   function syncCompose() {
     if (!ui.compose) return;
     const t = $('#cText'); if (t) ui.compose.text = t.value;
     const n = $('#cNum'); if (n) ui.compose.number = n.value === '' ? null : parseInt(n.value, 10);
+  }
+
+  // ------------------------------------------------------------ rulebook / almanac import
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      if (document.querySelector(`script[src="${src}"]`)) return resolve();
+      const el = document.createElement('script'); el.src = src; el.onload = resolve; el.onerror = () => reject(new Error('Could not load ' + src));
+      document.head.appendChild(el);
+    });
+  }
+  async function importLibrary() {
+    const input = $('#libFiles');
+    const files = input ? [...input.files] : [];
+    if (!files.length) return toast('Choose one or more PDF files first');
+    try {
+      toast('Reading PDFs… this can take a few seconds', 60000);
+      await loadScript('vendor/pdfjs/pdf.min.js');
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'vendor/pdfjs/pdf.worker.min.js';
+      const docs = [];
+      for (const f of files) docs.push(await window.BOTCLibrary.readPdf(window.pdfjsLib, new Uint8Array(await f.arrayBuffer()), f.name));
+      const lib = window.BOTCLibrary.parseDocs(docs, CH);
+      const n = Object.keys(lib.characters).length;
+      if (!n && !lib.rules) throw new Error('No characters or rules were found in those PDFs.');
+      await post('/api/library', { library: lib });
+      toast(`Imported ${n} characters${lib.rules ? ' and the rulebook' : ''}`, 5000);
+    } catch (e) { toast(e.message, 6000); }
   }
 
   // ------------------------------------------------------------ random bag
@@ -689,7 +850,25 @@
     addCustomRem: (d) => { const i = $('#customRem'); if (i && i.value.trim()) act('addReminder', { seatId: d.id, text: i.value }); },
     reveal: (d) => act('reveal', { seatId: d.id }).then((ok) => ok && toast(d.id === 'all' ? 'Characters sent to every player' : 'Character sent')),
     quick: (d) => act('sendInfo', { seatId: d.id, yes: d.k === 'yes' }).then((ok) => ok && toast('Sent')),
-    compose: (d) => { ui.compose = { seatId: d.id, text: '', chars: [], seats: [], number: null, yes: null, align: null }; renderModal(); },
+    compose: (d) => { ui.compose = { seatId: d.id || null, text: '', chars: [], seats: [], number: null, yes: null, align: null }; renderModal(); },
+    cShow: () => { syncCompose(); const c = ui.compose; openShow({ text: c.text, chars: c.chars, seats: c.seats, number: Number.isInteger(c.number) ? c.number : null, yes: c.yes, align: c.align }); },
+    showClose: () => closeShow(),
+    showFlip: () => { ui.show.flip = !ui.show.flip; renderShow(); },
+    showEdit: () => { const sh = ui.show; closeShow(); ui.compose = { seatId: null, text: sh.text, chars: sh.chars, seats: sh.seats, number: sh.number, yes: sh.yes, align: sh.align }; renderModal(); },
+    showChar: (d) => {
+      const s = V.full.seats.find((x) => x.id === d.id); if (!s || !s.character) return;
+      const id = s.shownChar || s.character;
+      openShow({ text: 'YOU ARE', chars: [id], align: s.alignment !== C.defaultAlignment(id) || cteam(id) === 'traveller' ? s.alignment : null });
+    },
+    showPreset: (d) => {
+      const f = V.full.seats.filter((s) => !s.isTraveller);
+      if (d.k === 'demon') openShow({ text: 'THIS IS THE DEMON', seats: f.filter((s) => cteam(s.character) === 'demon').map((s) => s.id) });
+      if (d.k === 'minions') openShow({ text: 'THESE ARE YOUR MINIONS', seats: f.filter((s) => cteam(s.character) === 'minion').map((s) => s.id) });
+      if (d.k === 'bluffs') openShow({ text: 'THESE CHARACTERS ARE NOT IN PLAY', chars: V.full.bluffs });
+    },
+    bookShow: (d) => openShow({ chars: [d.c] }),
+    bookSeg: (d) => { ui.bookSeg = d.k; render(); },
+    importLib: () => importLibrary(),
     closeCompose: () => { ui.compose = null; renderModal(); },
     cText: (d) => { syncCompose(); ui.compose.text = d.t; renderModal(); },
     cCharDel: (d) => { syncCompose(); ui.compose.chars = ui.compose.chars.filter((x) => x !== d.c); renderModal(); },
@@ -800,7 +979,7 @@
     if (el.dataset.change === 'scriptQ') {
       ui.scriptQ = el.value;
       const pos = el.selectionStart;
-      $('main').innerHTML = scriptTab();
+      $('main').innerHTML = bookView();
       const ni = $('.search'); ni.focus(); ni.setSelectionRange(pos, pos);
     }
   });
@@ -822,6 +1001,7 @@
     } catch (err) { toast(err.message, 4000); }
   });
   document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && ui.show) { closeShow(); return; }
     if (e.key === 'Escape' && ui.compose) { ui.compose = null; renderModal(); }
     if (e.key === 'Enter' && e.target.id === 'customRem') { e.preventDefault(); const b = $('[data-act="addCustomRem"]'); if (b) b.click(); }
     if (e.key === 'Enter' && e.target.id === 'newSeat') { e.preventDefault(); clickHandlers.addSeat(); }
