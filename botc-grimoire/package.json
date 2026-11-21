@@ -1,9 +1,0 @@
-{
-  "name": "botc-grimoire",
-  "version": "1.0.0",
-  "description": "Local-network Town Square, Grimoire and player notebook for Blood on the Clocktower",
-  "main": "server.js",
-  "private": true,
-  "scripts": { "start": "node server.js" },
-  "engines": { "node": ">=18" }
-}
